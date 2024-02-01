@@ -1,0 +1,4 @@
+./adaface/*ckpt
+./datasets/*
+*.ckpt
+./experiments/*
