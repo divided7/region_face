@@ -29,7 +29,8 @@ def opt():
     parser.add_argument('--epochs', default=200, type=int, help='number of epochs(iteration)')
     parser.add_argument('--optim', default='adam', type=str, help='sgd, adam')
     parser.add_argument('--val_per_epochs', default=1, type=int, help='训练时每隔多少epochs验证一次')
-
+    parser.add_argument('--lr_schedule', default=None, type=str,
+                        help='学习率衰减策略: cosine_anneal, reduceonplateau or lambda')
     return parser.parse_args()
 
 
@@ -109,9 +110,9 @@ def get_layer_params(model, lr, start_percentage, end_percentage, include=True):
 print('\033[95m' + '-' * 100 + '\033[0m')
 print('\033[95m learning rate \033[0m')
 lr_params = [
-    get_layer_params(model, lr=0.001, start_percentage=0.0, end_percentage=0.3),  # 浅层学习率
-    get_layer_params(model, lr=0.005, start_percentage=0.3, end_percentage=0.7),  # 中层学习率
-    get_layer_params(model, lr=0.01, start_percentage=0.7, end_percentage=1.0),  # 深层学习率
+    get_layer_params(model, lr=0.1, start_percentage=0.0, end_percentage=0.3),  # 浅层学习率
+    get_layer_params(model, lr=0.1, start_percentage=0.3, end_percentage=0.7),  # 中层学习率
+    get_layer_params(model, lr=0.1, start_percentage=0.7, end_percentage=1.0),  # 深层学习率
 ]
 
 if opt.optim == 'sgd':
@@ -123,7 +124,26 @@ elif opt.optim == 'adam':
 else:
     raise ValueError
 
-criterion = torch.nn.CrossEntropyLoss(label_smoothing=0.05)
+
+def lr_schadule(opt, optimizer, schedule=None):
+    from torch.optim.lr_scheduler import CosineAnnealingLR, ReduceLROnPlateau, LambdaLR
+    if schedule == "cosine_anneal":
+        print("使用余弦退火学习率")
+        scheduler = CosineAnnealingLR(optimizer, T_max=opt.epochs, eta_min=0.0001)  # 余弦退火
+    elif schedule == "reduceonplateau":
+        print("TODO: 使用平坦时衰减学习率")
+        scheduler = None
+    elif schedule == "lambda":
+        print("TODO: 使用lambda学习率")
+        scheduler = None
+    else:
+        scheduler = None
+    return scheduler
+
+
+scheduler = lr_schadule(opt=opt, optimizer=optimizer, schedule=opt.lr_schedule)
+
+criterion = torch.nn.CrossEntropyLoss()
 
 # device
 device = opt.device if torch.cuda.is_available() else "cpu"
@@ -147,6 +167,9 @@ val_loss_between_epochs = []
 val_acc_between_epochs = []
 work = opt.work
 min_acc = 0
+
+print('\033[95m' + '-' * 100 + '\033[0m')
+print('\033[95m start training \033[0m')
 for epoch in range(1, opt.epochs + 1):
     loss_between_batchs = []
     acc_between_batchs = []
@@ -158,19 +181,17 @@ for epoch in range(1, opt.epochs + 1):
         # forward
         data = image.to(device)
         label = eval(opt.work).to(device)
-        pred_label, pred_norm = model(data)
+        pred_label, _ = model(data)
 
         # backward and evaluate
         loss = criterion(pred_label, label)
         _, predicted = torch.max(pred_label.data, 1)
         acc = (predicted == label).sum() / len(label)
         loss_between_batchs.append(loss.item())
-        acc_between_batchs.append(acc)
+        acc_between_batchs.append(acc.item())
 
         optimizer.zero_grad()
         optimizer.step()
-
-
 
     # record
     epoch_loss = np.mean(loss_between_batchs)
@@ -178,9 +199,17 @@ for epoch in range(1, opt.epochs + 1):
     train_loss_between_epochs.append(epoch_loss)
     train_acc_between_epochs.append(epoch_acc)
 
-    current_lr0 = optimizer.param_groups[0]['lr']  # 浅层学习率
-    current_lr1 = optimizer.param_groups[1]['lr']  # 中层学习率
-    current_lr2 = optimizer.param_groups[1]['lr']  # 深层学习率
+    try:
+        current_lr0 = scheduler.get_last_lr()[0]
+        current_lr1 = scheduler.get_last_lr()[1]
+        current_lr2 = scheduler.get_last_lr()[2]
+        scheduler.step()  # 如果配置了学习率衰减策略, 则对学习率衰减
+    except:
+        # 如果没用衰减的话
+        current_lr0 = optimizer.param_groups[0]['lr']  # 浅层学习率
+        current_lr1 = optimizer.param_groups[1]['lr']  # 中层学习率
+        current_lr2 = optimizer.param_groups[2]['lr']  # 深层学习率
+        pass
 
     writer["train_loss"].add_scalar("Total Loss", epoch_loss, epoch)
     writer1["train_acc"].add_scalar("Total Acc", epoch_acc, epoch)
@@ -189,8 +218,8 @@ for epoch in range(1, opt.epochs + 1):
     writer2["deep_lr"].add_scalar("Lr", current_lr2, epoch)
     # print("\033[91mThis is red text\033[0m")# 彩色字体 # \033[91m代表字体颜色 \033[0m代表字体背景底色
     print(
-        '\033[95m● Train ● : Epoch: {:4}/{} | Total Acc: {:.4f} | Total Loss: {:.4f} | {}\033[0m'.format(
-            epoch, opt.epochs, epoch_acc, epoch_loss,
+        '\033[95m● Train ● : Epoch: {:4}/{} | Total Acc: {:.4f} | Total Loss: {:.4f} | LR=[{},{},{}] | {}\033[0m'.format(
+            epoch, opt.epochs, epoch_acc, epoch_loss, current_lr0, current_lr1, current_lr2,
             datetime.datetime.now().strftime('%H:%M:%S')))
 
     # val
@@ -201,15 +230,13 @@ for epoch in range(1, opt.epochs + 1):
             for batch_idx, (image, age, gender, race) in enumerate(val_loader):
                 data = image.to(device)
                 label = eval(opt.work).to(device)
-                pred_label, pred_norm = model(data)
+                pred_label, _ = model(data)
 
                 loss = criterion(pred_label, label)
                 _, predicted = torch.max(pred_label.data, 1)
                 acc = (predicted == label).sum() / len(label)
                 val_loss_between_batchs.append(loss.item())
-                val_acc_between_batchs.append(acc)
-
-
+                val_acc_between_batchs.append(acc.item())
 
             epoch_val_loss = np.mean(val_loss_between_batchs)
             epoch_val_acc = np.mean(val_acc_between_batchs)
